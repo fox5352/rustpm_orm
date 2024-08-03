@@ -1,5 +1,6 @@
 pub mod database {
-    use rusqlite::Connection;
+    use serde_derive::{Deserialize, Serialize};
+    use sled::{Db, open};
     
     pub struct ImageData {
         pub name: String,
@@ -7,6 +8,7 @@ pub mod database {
         pub file_type: String,
     }
 
+    #[derive(Deserialize, Serialize, Debug)]
     pub struct ImageDataDB {
         pub id: i32,
         pub title: String,
@@ -15,15 +17,16 @@ pub mod database {
     }
 
     pub struct DBManager {
-        pub conn: Connection,
+        conn: Db,
         pub _database_name: String
     }
 
     impl DBManager {
         pub fn new(database_name: String) -> DBManager {
             let name = database_name.clone();
-
-            let conn = Connection::open(database_name).unwrap();
+            let path = std::path::Path::new(&database_name);
+            // let conn = open(database_name).unwrap();
+            let conn = open(path).unwrap();
 
             return DBManager {
                 conn,
@@ -31,65 +34,73 @@ pub mod database {
             };
         }
 
-        // IMAGE TABEL MANAGEMENT FUNCTIONS
-        pub fn create_image_table(&self) -> Result<(), rusqlite::Error>{
-            let query = "CREATE TABLE IF NOT EXISTS images ( id INTEGER PRIMARY KEY, title VARCHAR(255) NOT NULL, data BLOB NOT NULL, type VARCHAR(50) NOT NULL)";
-
-            return match self.conn.execute(query, []) {
-                Err(e) => Err(e),
-                Ok(_) => Ok(())
+        pub fn insert_image(&self, image: ImageData) -> Result<String, std::io::Error> {
+            let id = match self.conn.generate_id() {
+                Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Failed to generate ID")),   
+                Ok(id) => id as i32,
             };
-        }
 
-        pub fn insert_image(&self, image: ImageData) -> Result<String, rusqlite::Error> {
-            let query = "INSERT INTO images (title, data, type) VALUES (?, ?, ?)";
-
-            return match self.conn.execute(&query, (image.name.clone(), image.data.clone(), image.file_type.clone())) {
-                Ok(_) => Ok(String::from("successfully inserted image")),
-                Err(e) => Err(e)
+            let new_image = ImageDataDB {
+                id: id,
+                title: image.name,
+                data: image.data,
+                file_type: image.file_type,
             };
-        }
-    
-        pub fn get_images(&self) -> Result<Vec<ImageDataDB>, rusqlite::Error> {
-            let mut images: Vec<ImageDataDB> = Vec::new();
+
+            let serialized_image = match bincode::serialize(&new_image) {
+                Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "failed to serialize image data")),
+                Ok(data) => data,
+            };
             
-            let mut stmt = self.conn.prepare("SELECT id, title, data, type FROM images")?;
-            let image_iter = stmt.query_map([], |row| {
-                return Ok(ImageDataDB {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    data: row.get(2)?,
-                    file_type: row.get(3)?,
-                })
-            })?;
 
-            for image in image_iter {
-                if let Ok(data) = image {
-                    images.push(data)
-                }
-            }
+            match self.conn.insert(id.to_be_bytes(), serialized_image) {
+                Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::Other, "failed to insert image data")),
+                Ok(data) => data,
+            };
 
-            return Ok(images);
+            return Ok("successfully inserted image data".to_string());
+        }
+        pub fn get_image(&self, id: u64) -> Option<ImageDataDB> {
+            self.conn.get(id.to_be_bytes()).unwrap().and_then(|ivec| bincode::deserialize(&ivec).ok())
         }
     
-        pub fn delete_image(&self, id: i32) -> Result<usize, rusqlite::Error> {
-            let query = format!("DELETE FROM images WHERE id = {}", id);
+        pub fn get_images(&self) -> Vec<ImageDataDB> {
+            self.conn.iter().filter_map(|result| {
+                result.ok().and_then(|(_, v)| bincode::deserialize(&v).ok())
+            }).collect()
+        
+        }
+        
+        pub fn delete_image(&self, id: u64) -> Result<String, std::io::Error> {
+            return match self.conn.remove(id.to_be_bytes()) {
+                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::Other, "failed to remove image")),
+                Ok(_) => Ok("Successfully removed image".to_string()),
+            }
+        }
+        
+        pub fn close(&self) {
+            self.conn.flush().unwrap();
+        }
+    }
 
-            let res = self.conn.execute(&query, ())?;
-
-            return Ok(res);
+    impl Drop for DBManager {
+        fn drop(&mut self) {
+            self.close()
         }
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::database;
+    use std::sync::Mutex;
+    use lazy_static::lazy_static;
 
-    #[test]
-    fn test_create_image_table() {
-        let db_manager = database::DBManager::new("test_images.db".to_string());
-        assert!(db_manager.create_image_table().is_ok());
+    lazy_static! {
+        static ref DB_MANAGER: Mutex<database::DBManager> = Mutex::new(
+            database::DBManager::new("test_images".to_string())
+        );
     }
 
     #[test]
@@ -97,54 +108,39 @@ mod tests {
         let test_image = database::ImageData {
             name: "Test Image".to_string(),
             data: vec![0, 1, 2, 3, 4, 5],
-            file_type: "image/png".to_string(),
+            file_type: "png".to_string(),
         };
 
-        let db_manager = database::DBManager::new("test_images.db".to_string());
-        assert!(db_manager.create_image_table().is_ok());
-        
+        let db_manager = DB_MANAGER.lock().unwrap();
         assert!(db_manager.insert_image(test_image).is_ok());
     }
 
     #[test]
     fn test_get_images() {
-        let db_manager = database::DBManager::new("test_images.db".to_string());
-        assert!(db_manager.create_image_table().is_ok());
-
-        let test_image = database::ImageData {
-            name: "Test Image".to_string(),
-            data: vec![0, 1, 2, 3, 4, 5],
-            file_type: "image/png".to_string(),
-        };
-
-        db_manager.insert_image(test_image).unwrap();
-
-        let images = db_manager.get_images().unwrap();
-        assert!(images.len() > 0);
-    }
-
-    #[test]
-    fn test_delete_image() {
-        let db = database::DBManager::new("test_images.db".to_string());
-        assert!(db.create_image_table().is_ok());
-
         let test_image = database::ImageData {
             name: "Test Image".to_string(),
             data: vec![0, 1, 2, 3, 4, 5],
             file_type: "png".to_string(),
         };
-        
-        assert!(db.insert_image(test_image).is_ok());
 
+        let db_manager = DB_MANAGER.lock().unwrap();
+        assert!(db_manager.insert_image(test_image).is_ok());
 
-        let images = db.get_images().unwrap();
+        let images = db_manager.get_images();
+        assert!(images.len() > 0);
+    }
 
-        let len_before = images.len();
+    #[test]
+    fn test_delete_image() {
+        let test_image = database::ImageData {
+            name: "Test Image".to_string(),
+            data: vec![0, 1, 2, 3, 4, 5],
+            file_type: "png".to_string(),
+        };
 
-        db.delete_image(images[0].id).unwrap();
+        let db_manager = DB_MANAGER.lock().unwrap();
+        assert!(db_manager.insert_image(test_image).is_ok());
 
-        let images = db.get_images().unwrap();
-
-        eprintln!("{} :: {}", images.len(), len_before);
+        assert!(db_manager.delete_image(1).is_ok());
     }
 }
