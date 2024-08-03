@@ -60,6 +60,7 @@ pub mod database {
 
             return Ok("successfully inserted image data".to_string());
         }
+        
         pub fn get_image(&self, id: u64) -> Option<ImageDataDB> {
             self.conn.get(id.to_be_bytes()).unwrap().and_then(|ivec| bincode::deserialize(&ivec).ok())
         }
@@ -71,10 +72,11 @@ pub mod database {
         
         }
         
-        pub fn delete_image(&self, id: u64) -> Result<String, std::io::Error> {
-            return match self.conn.remove(id.to_be_bytes()) {
-                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::Other, "failed to remove image")),
-                Ok(_) => Ok("Successfully removed image".to_string()),
+        pub fn delete_image(&self, id: i32) -> Result<String, std::io::Error> {
+            match self.conn.remove(id.to_be_bytes()) {
+                Ok(Some(_)) => Ok("Successfully removed image".to_string()),
+                Ok(None) => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Image not found")),
+                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to remove image")),
             }
         }
         
@@ -132,15 +134,29 @@ mod tests {
 
     #[test]
     fn test_delete_image() {
+        let db_manager = DB_MANAGER.lock().unwrap();
+        
+        // Clear the database before the test
+        for image in db_manager.get_images() {
+            db_manager.delete_image(image.id).unwrap();
+        }
+
         let test_image = database::ImageData {
             name: "Test Image".to_string(),
             data: vec![0, 1, 2, 3, 4, 5],
             file_type: "png".to_string(),
         };
 
-        let db_manager = DB_MANAGER.lock().unwrap();
-        assert!(db_manager.insert_image(test_image).is_ok());
+        db_manager.insert_image(test_image).unwrap();
 
-        assert!(db_manager.delete_image(1).is_ok());
+        let images = db_manager.get_images();
+        assert_eq!(images.len(), 1);
+
+        let image_to_delete = &images[0];
+        let delete_result = db_manager.delete_image(image_to_delete.id);
+        assert!(delete_result.is_ok());
+
+        let images_after_delete = db_manager.get_images();
+        assert_eq!(images_after_delete.len(), 0);
     }
 }
