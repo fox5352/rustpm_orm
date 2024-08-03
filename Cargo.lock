@@ -111,7 +111,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustsql"
+name = "rustpm_orm"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
