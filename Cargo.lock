@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "rustpm_orm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "lazy_static",
