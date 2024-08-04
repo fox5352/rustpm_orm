@@ -238,5 +238,30 @@ mod tests {
         assert!(all_data.len() >= mock_data.len())
 
     }
-    
+
+
+    #[test]
+    fn test_get_by_id() {
+        let db = DBM.lock().unwrap();
+
+        let mock_data = read_bible_csv("./test.csv").unwrap();
+        
+        let new_data: Vec<BibleVerseType> = mock_data.iter().map(|data| {
+            BibleVerseType {
+                verse_id: data.verse_id,
+                book_name: data.book_name.clone(),
+                book_number: data.book_number,
+                chapter: data.chapter,
+                verse: data.verse,
+                text: data.text.clone(),
+            }
+        }).collect();
+
+        for data in new_data {
+            assert!(db.insert_data(data).is_ok());
+        }
+
+        let data = db.get_by_id::<BibleVerseType>(mock_data[0].verse_id);
+        assert!(data.is_some());
+    }
 }
