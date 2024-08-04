@@ -2,4 +2,4 @@
 
 *.db
 
-test_images/
+test_*/
