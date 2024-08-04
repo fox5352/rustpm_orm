@@ -1,30 +1,7 @@
 pub mod database {
     use std::io::Error;
-
     use serde::{Deserialize, Serialize};
-    use serde_derive::{Deserialize, Serialize};
     use sled::{Db, open};
-
-    pub struct ImageData {
-        pub name: String,
-        pub data: Vec<u8>,
-        pub file_type: String,
-    }
-
-    #[derive(Deserialize, Serialize, Debug)]
-    pub struct ImageDataDB {
-        pub id: i32,
-        pub title: String,
-        pub data: Vec<u8>,
-        pub file_type: String,
-    }
-
-    #[derive(Debug, Deserialize, Serialize)]
-    pub struct BibleBook {
-        pub book_number: u32,
-        pub book_name: String,
-        pub bible_verse_ids: Vec<u32>,
-    }
 
     pub trait Id {
         fn get_id(&self) -> u32;
