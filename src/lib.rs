@@ -86,22 +86,31 @@ pub mod database {
 
         /// Inserts data into the database.
         ///
+        /// This function serializes the provided data and stores it in the database.
         /// The data must implement the `Id` trait to provide a unique identifier,
-        /// and `Serialize`/`Deserialize` for storage.
+        /// and `Serialize`/`Deserialize` to allow for serialization and deserialization.
         ///
         /// # Arguments
         ///
-        /// * `data` - The data to insert
+        /// * `data` - The data to insert, which must implement the following traits:
+        ///   - `Id`: To provide a unique identifier.
+        ///   - `Serialize`: To allow the data to be serialized for storage.
+        ///   - `Deserialize`: To allow deserialization (even though not used directly here).
+        ///
+        /// # Returns
+        ///
+        /// * `Ok(u32)` - The unique identifier (`id`) of the inserted data.
+        /// * `Err(std::io::Error)` - If the operation fails.
         ///
         /// # Errors
         ///
-        /// Returns an error if:
-        /// * Data serialization fails
-        /// * Database insertion fails
+        /// this function will return an error if:
+        /// * data serialization using `bincode` fails.
+        /// * the database insertion operation fails.
         pub fn insert_data<'a, T: Id + Deserialize<'a> + Serialize>(
             &self,
             data: T,
-        ) -> Result<String, std::io::Error>
+        ) -> Result<u32, std::io::Error>
         where
             T: Deserialize<'a> + Serialize + Id,
         {
@@ -124,7 +133,7 @@ pub mod database {
                         "failed to serialize data",
                     ))
                 }
-                Ok(_) => Ok("successfully inserted data".to_string()),
+                Ok(_) => Ok(id),
             }
         }
 
