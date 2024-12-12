@@ -1,45 +1,78 @@
 pub mod database {
     use serde::{Deserialize, Serialize};
     use sled::{open, Db};
-    use std::io::Error;
+    use uuid::Uuid;
 
-    /// A trait for types that have a unique identifier.
-    pub trait Id {
-        /// Returns the unique identifier for this instance.
-        fn get_id(&self) -> u32;
+    #[derive(Debug)]
+    pub enum DBErrorKind {
+        NotFound(String),
+        WriteFailed(String),
+        ReadFailed(String),
+        Other(String)
     }
 
-    /// Database manager that provides CRUD operations with automatic ID management.
-    ///
-    /// The `DBManager` wraps a key-value database and handles:
-    /// * Automatic ID generation
-    /// * Serialization/deserialization of data
-    /// * Basic CRUD operations
-    /// * Automatic resource cleanup
-    ///
-    /// # Example
-    /// ```
-    /// use your_crate::{DBManager, Id};
-    ///
-    /// #[derive(Debug, Serialize, Deserialize)]
-    /// struct User {
-    ///     id: u32,
-    ///     name: String,
-    /// }
-    ///
-    /// impl Id for User {
-    ///     fn get_id(&self) -> u32 {
-    ///         self.id
-    ///     }
-    /// }
-    ///
-    /// let db = DBManager::new("users.db".to_string());
-    /// let user = User {
-    ///     id: db.gen_id().unwrap(),
-    ///     name: "John".to_string(),
-    /// };
-    /// db.insert_data(user).unwrap();
-    /// ```
+    #[derive(Debug)]
+    pub struct DBError {
+        kind: DBErrorKind,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    }
+
+    impl DBError {
+        pub fn new(kind:DBErrorKind) -> Self {
+            return DBError { kind, source: Option::None }
+        }
+
+        pub fn with_source(kind: DBErrorKind, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+            return DBError {
+                kind,
+                source: Some(Box::new(source)),
+            }
+        }
+
+        pub fn kind(&self) -> &DBErrorKind {
+            return &self.kind
+        }
+    }
+
+    impl std::fmt::Display for DBError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            return match &self.kind {
+                DBErrorKind::NotFound(msg) => write!(f, "NotFound {}",msg),
+                DBErrorKind::ReadFailed(msg) => write!(f, "failed to read from database {}",msg),
+                DBErrorKind::WriteFailed(msg) => write!(f, "failed to write to database {}", msg),
+                DBErrorKind::Other(msg) => write!(f, "{}", msg)
+            }
+        }
+    }
+
+    impl std::error::Error for DBError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source.as_ref().map(|e| e.as_ref() as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    impl From<sled::Error> for DBError {
+        fn from(err: sled::Error) -> Self {
+            let kind = match err.clone() {
+                sled::Error::CollectionNotFound(_) => DBErrorKind::NotFound("collection not found".to_string()),
+                sled::Error::Io(msg) => DBErrorKind::Other(msg.to_string()),
+                sled::Error::Unsupported(msg) => DBErrorKind::Other(msg),
+                sled::Error::ReportableBug(_) => DBErrorKind::Other("Dependency failed in some way".to_string()),
+                _ => DBErrorKind::Other("A corruption occurred".to_string())
+            };
+
+            return DBError::with_source(kind, err);
+        }
+    }
+
+    pub fn gen_id() -> String {
+        return Uuid::new_v4().to_string();
+    }
+
+    pub trait Id {
+        fn gen_id(&self) -> String;
+    }
+
     #[derive(Debug, Clone)]
     pub struct DBManager {
         conn: Db,
@@ -47,164 +80,85 @@ pub mod database {
     }
 
     impl DBManager {
-        /// Generates a new unique identifier.
-        ///
-        /// # Errors
-        ///
-        /// Returns an error if the underlying database fails to generate an ID.
-        pub fn gen_id(&self) -> Result<u32, Error> {
-            match self.conn.generate_id() {
-                Err(e) => {
-                    eprintln!("Error {}", e);
-                    return Err(Error::new(
-                        std::io::ErrorKind::Other,
-                        "failed to generate id".to_string(),
-                    ));
-                }
-                Ok(id) => Ok(id as u32),
-            }
+        pub fn gen_id(&self) -> String {
+            return gen_id();
         }
 
-        /// Creates a new database manager instance.
-        ///
-        /// # Arguments
-        ///
-        /// * `database_name` - Path to the database file
-        ///
-        /// # Panics
-        ///
-        /// Panics if the database connection cannot be established.
-        pub fn new(database_name: String) -> DBManager {
+        pub fn new(database_name: String) -> Result<DBManager, DBError> {
             let name = database_name.clone();
             let path = std::path::Path::new(&database_name);
-            let conn = open(path).unwrap();
-            return DBManager {
+            let conn = open(path)?;
+            return Ok(DBManager {
                 conn,
                 database_name: name.to_owned(),
-            };
+            });
         }
 
-        /// Inserts data into the database.
-        ///
-        /// This function serializes the provided data and stores it in the database.
-        /// The data must implement the `Id` trait to provide a unique identifier,
-        /// and `Serialize`/`Deserialize` to allow for serialization and deserialization.
-        ///
-        /// # Arguments
-        ///
-        /// * `data` - The data to insert, which must implement the following traits:
-        ///   - `Id`: To provide a unique identifier.
-        ///   - `Serialize`: To allow the data to be serialized for storage.
-        ///   - `Deserialize`: To allow deserialization (even though not used directly here).
-        ///
-        /// # Returns
-        ///
-        /// * `Ok(u32)` - The unique identifier (`id`) of the inserted data.
-        /// * `Err(std::io::Error)` - If the operation fails.
-        ///
-        /// # Errors
-        ///
-        /// this function will return an error if:
-        /// * data serialization using `bincode` fails.
-        /// * the database insertion operation fails.
         pub fn insert_data<'a, T: Id + Deserialize<'a> + Serialize>(
             &self,
             data: T,
-        ) -> Result<u32, std::io::Error>
+        ) -> Result<String, DBError>
         where
             T: Deserialize<'a> + Serialize + Id,
         {
             let serialized_data = match bincode::serialize(&data) {
                 Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "failed to serialize data",
-                    ))
+                    return Err(DBError::new(DBErrorKind::Other("failed to serialize data".to_string())))
                 }
                 Ok(data) => data,
             };
 
-            let id = data.get_id();
+            let id = data.gen_id();
 
-            match self.conn.insert(id.to_be_bytes(), serialized_data) {
+            match self.conn.insert(id.clone(), serialized_data) {
                 Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "failed to serialize data",
-                    ))
+                    return Err(DBError::new(DBErrorKind::Other("failed to serialize data".to_string())))
                 }
                 Ok(_) => Ok(id),
             }
         }
 
-        /// Retrieves data by its ID.
-        ///
-        /// # Arguments
-        ///
-        /// * `id` - The unique identifier of the record to retrieve
-        ///
-        /// # Type Parameters
-        ///
-        /// * `T` - The type of data to deserialize into. Must implement `Id`, `Serialize`, and `Deserialize`
-        ///
-        /// # Returns
-        ///
-        /// Returns `None` if no data exists for the given ID.
-        pub fn get_by_id<T>(&self, id: u32) -> Option<T>
+        pub fn get_by_id<T>(&self, id: String) -> Result<T, DBError>
         where
             T: for<'a> Deserialize<'a> + Serialize + Id,
         {
-            self.conn
-                .get(id.to_be_bytes())
-                .unwrap()
-                .and_then(|ivec| bincode::deserialize(&ivec).ok())
-        }
-
-        /// Retrieves all records from the database.
-        ///
-        /// # Type Parameters
-        ///
-        /// * `T` - The type of data to deserialize into. Must implement `Id`, `Serialize`, and `Deserialize`
-        pub fn get_all_data<'b, T>(&self) -> Vec<T>
-        where
-            T: for<'a> Deserialize<'a> + Serialize + Id,
-        {
-            self.conn
-                .iter()
-                .filter_map(|result| result.ok().and_then(|(_, v)| bincode::deserialize(&v).ok()))
-                .collect()
-        }
-
-        /// Deletes a record by its ID.
-        ///
-        /// # Arguments
-        ///
-        /// * `id` - The unique identifier of the record to delete
-        ///
-        /// # Errors
-        ///
-        /// Returns an error if:
-        /// * No data exists for the given ID
-        /// * Database deletion fails
-        pub fn delete_by_id(&self, id: u32) -> Result<String, std::io::Error> {
-            match self.conn.remove(id.to_be_bytes()) {
-                Err(_) => Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "No data found for this id",
-                )),
-                Ok(_) => Ok("Successfully deleted data".to_string()),
+            let result = self.conn.get(id)?;
+            if let Some(data) =  result.and_then(|ivec| bincode::deserialize(&ivec).ok()){
+                return Ok(data);
+            }else {
+                return Err(DBError::new(DBErrorKind::ReadFailed("".to_string())));
             }
         }
 
-        /// Flushes any pending database operations.
-        ///
-        /// This is automatically called when the `DBManager` is dropped.
+        // TODO:: redo later
+        // pub fn get_all_data<'b, T>(&self) -> Vec<T>
+        // where
+        //     T: for<'a> Deserialize<'a> + Serialize + Id,
+        // {
+        //     self.conn
+        //         .iter()
+        //         .filter_map(|result| result.ok().and_then(|(_, v)| bincode::deserialize(&v).ok()))
+        //         .collect()
+        // }
+
+        pub fn delete_by_id(&self, id: String) -> Result<String, DBError> {
+            if self.conn.get(id.clone()).is_ok() {
+                if self.conn.remove(id)?.is_some() {
+                    return  Ok("data successfully removed".to_string());
+                }else {
+                    return Err(DBError::new(DBErrorKind::ReadFailed("".to_string())));
+                }
+                
+            }else {
+                return Err(DBError::new(DBErrorKind::NotFound("delete operation failed".to_string())));
+            }
+        }
+
         pub fn close(&self) {
             self.conn.flush().unwrap();
         }
     }
 
-    /// Implements automatic resource cleanup when `DBManager` is dropped.
     impl Drop for DBManager {
         fn drop(&mut self) {
             self.close()
@@ -212,180 +166,147 @@ pub mod database {
     }
 }
 
-pub mod utils {
-    use std::fs;
-
-    pub struct BibleVerse {
-        pub verse_id: u32,
-        pub book_name: String,
-        pub book_number: u32,
-        pub chapter: u32,
-        pub verse: u32,
-        pub text: String,
-    }
-
-    pub fn read_bible_csv(file_path: &str) -> Result<Vec<BibleVerse>, std::io::Error> {
-        let contents = fs::read_to_string(file_path)?;
-        let mut rows: Vec<BibleVerse> = Vec::new();
-
-        let mut lines = contents.lines();
-
-        lines.next().unwrap(); // ead useless line
-
-        for line in lines {
-            let fields: Vec<&str> = line.split(",").collect();
-            if fields.len() == 6 {
-                let verse_id: u32 = fields[0].parse().unwrap();
-                let book_name = fields[1].to_string();
-                let book_number: u32 = fields[2].parse().unwrap();
-                let chapter: u32 = fields[3].parse().unwrap();
-                let verse: u32 = fields[4].parse().unwrap();
-                let text = fields[5].to_string();
-
-                rows.push(BibleVerse {
-                    verse_id,
-                    book_name,
-                    book_number,
-                    chapter,
-                    verse,
-                    text,
-                });
-            }
-        }
-
-        Ok(rows)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::utils::read_bible_csv;
-
-    use super::database;
-    use lazy_static::lazy_static;
+    use super::database::*;
     use serde_derive::{Deserialize, Serialize};
-    use std::sync::Mutex;
+    use std::fs;
 
-    use super::database::Id;
-
-    // ----------------------------------------------------------------
-    lazy_static! {
-        static ref DBM: Mutex<database::DBManager> =
-            Mutex::new(database::DBManager::new("test_database".to_string()));
+    // Helper test struct
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestUser {
+        id: String,
+        name: String,
+        age: u32,
     }
 
-    // testing bible verse
-    #[derive(Debug, Deserialize, Serialize)]
-    struct BibleVerseType {
-        verse_id: u32,
-        book_name: String,
-        book_number: u32,
-        chapter: u32,
-        verse: u32,
-        text: String,
-    }
-
-    impl Id for BibleVerseType {
-        fn get_id(&self) -> u32 {
-            self.verse_id
+    impl Id for TestUser {
+        fn gen_id(&self) -> String {
+            return gen_id();
         }
     }
 
+    // Helper function to clean up test database
+    fn cleanup_test_db(db_name: &str) {
+        let _ = fs::remove_dir_all(db_name);
+    }
+
     #[test]
-    fn test_insert() {
-        let db = DBM.lock().unwrap();
+    fn test_db_creation() {
+        let db_name = "test_create_db";
+        cleanup_test_db(db_name);
 
-        let test_data = read_bible_csv("./test.csv").unwrap();
+        let db = DBManager::new(db_name.to_string());
+        assert!(db.is_ok());
 
-        let test_data = BibleVerseType {
-            verse_id: test_data[0].verse_id,
-            book_name: test_data[0].book_name.clone(),
-            book_number: test_data[0].book_number,
-            chapter: test_data[0].chapter,
-            verse: test_data[0].verse,
-            text: test_data[0].text.clone(),
+        cleanup_test_db(db_name);
+    }
+
+    #[test]
+    fn test_gen_id() {
+        let db_name = "test_gen_id_db";
+        cleanup_test_db(db_name);
+
+        let db = DBManager::new(db_name.to_string()).unwrap();
+        let id1 = db.gen_id();
+        let id2 = db.gen_id();
+
+        assert_ne!(id1, id2, "Generated IDs should be unique");
+        assert_eq!(id1.len(), 36, "UUID should be 36 characters long");
+
+        cleanup_test_db(db_name);
+    }
+
+    #[test]
+    fn test_insert_and_get_data() {
+        let db_name = "test_insert_db";
+        cleanup_test_db(db_name);
+
+        let db = DBManager::new(db_name.to_string()).unwrap();
+        let test_user = TestUser {
+            id: db.gen_id(),
+            name: "John Doe".to_string(),
+            age: 30,
         };
 
-        assert!(db.insert_data(test_data).is_ok());
+        let inserted_id = db.insert_data(test_user.clone()).unwrap();
+        let retrieved_user: TestUser = db.get_by_id(inserted_id.clone()).unwrap();
+
+        assert_eq!(retrieved_user.id, test_user.id);
+        assert_eq!(retrieved_user.name, test_user.name);
+        assert_eq!(retrieved_user.age, test_user.age);
+
+        cleanup_test_db(db_name);
     }
 
     #[test]
-    fn test_get_all_data() {
-        let db = DBM.lock().unwrap();
+    fn test_get_nonexistent_data() {
+        let db_name = "test_get_none_db";
+        cleanup_test_db(db_name);
 
-        let mock_data = read_bible_csv("./test.csv").unwrap();
+        let db = DBManager::new(db_name.to_string()).unwrap();
+        let retrieved_user: Result<TestUser, DBError> = db.get_by_id("nonexistent_id".to_string());
 
-        let new_data = mock_data.iter().map(|data| BibleVerseType {
-            verse_id: data.verse_id,
-            book_name: data.book_name.clone(),
-            book_number: data.book_number,
-            chapter: data.chapter,
-            verse: data.verse,
-            text: data.text.clone(),
-        });
+        assert!(retrieved_user.is_err());
 
-        for data in new_data {
-            assert!(db.insert_data(data).is_ok());
-        }
-
-        let all_data = db.get_all_data::<BibleVerseType>();
-        assert!(all_data.len() >= mock_data.len())
+        cleanup_test_db(db_name);
     }
 
     #[test]
-    fn test_get_by_id() {
-        let db = DBM.lock().unwrap();
+    fn test_delete_data() {
+        let db_name = "test_delete_db";
+        cleanup_test_db(db_name);
 
-        let mock_data = read_bible_csv("./test.csv").unwrap();
+        let db = DBManager::new(db_name.to_string()).unwrap();
+        let test_user = TestUser {
+            id: db.gen_id(),
+            name: "Jane Doe".to_string(),
+            age: 25,
+        };
 
-        let new_data: Vec<BibleVerseType> = mock_data
-            .iter()
-            .map(|data| BibleVerseType {
-                verse_id: data.verse_id,
-                book_name: data.book_name.clone(),
-                book_number: data.book_number,
-                chapter: data.chapter,
-                verse: data.verse,
-                text: data.text.clone(),
-            })
-            .collect();
+        let inserted_id = db.insert_data(test_user).unwrap();
+        let delete_result = db.delete_by_id(inserted_id.clone());
+        assert!(delete_result.is_ok());
 
-        for data in new_data {
-            assert!(db.insert_data(data).is_ok());
-        }
+        let retrieved_user: Result<TestUser, DBError> = db.get_by_id(inserted_id);
+        assert!(retrieved_user.is_err());
 
-        let data = db.get_by_id::<BibleVerseType>(mock_data[0].verse_id);
-        assert!(data.is_some());
+        cleanup_test_db(db_name);
     }
 
     #[test]
-    fn test_delete_by_id() {
-        let db = DBM.lock().unwrap();
+    fn test_delete_nonexistent_data() {
+        let db_name = "test_delete_none_db";
+        cleanup_test_db(db_name);
 
-        let mock_data = read_bible_csv("./test.csv").unwrap();
+        let db = DBManager::new(db_name.to_string()).unwrap();
+        let delete_result = db.delete_by_id("nonexistent_id".to_string());
 
-        let new_data: Vec<BibleVerseType> = mock_data
-            .iter()
-            .map(|data| BibleVerseType {
-                verse_id: data.verse_id,
-                book_name: data.book_name.clone(),
-                book_number: data.book_number,
-                chapter: data.chapter,
-                verse: data.verse,
-                text: data.text.clone(),
-            })
-            .collect();
+        assert!(delete_result.is_err());
 
-        for data in new_data {
-            assert!(db.insert_data(data).is_ok());
+        cleanup_test_db(db_name);
+    }
+
+    #[test]
+    fn test_database_close() {
+        let db_name = "test_close_db";
+        cleanup_test_db(db_name);
+
+        {
+            let db = DBManager::new(db_name.to_string()).unwrap();
+            let test_user = TestUser {
+                id: db.gen_id(),
+                name: "Test User".to_string(),
+                age: 20,
+            };
+            db.insert_data(test_user).unwrap();
+            // Database will be automatically closed here due to Drop trait
         }
 
-        let before_len = db.get_all_data::<BibleVerseType>().len() as u64;
+        // Verify we can open and read from the database again
+        let db = DBManager::new(db_name.to_string()).unwrap();
+        assert_eq!(db.database_name, db_name);
 
-        db.delete_by_id(mock_data[0].verse_id).unwrap();
-
-        let after_len = db.get_all_data::<BibleVerseType>().len() as u64;
-
-        assert!(before_len > after_len);
+        cleanup_test_db(db_name);
     }
 }
